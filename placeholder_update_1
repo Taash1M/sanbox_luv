@@ -1,0 +1,326 @@
+import os
+from pathlib import Path
+import textwrap
+import argparse
+
+REPO_ROOT = Path(__file__).resolve().parent
+
+
+def write_file_if_placeholder(path: Path, content: str, overwrite: bool = False):
+    """
+    Write content to a file if:
+      - the file does not exist, or
+      - the file name suggests placeholder, or
+      - overwrite=True is set.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not path.exists():
+        path.write_text(content, encoding="utf-8")
+        print(f"[CREATED] {path}")
+        return
+
+    existing = path.read_text(encoding="utf-8").strip().lower()
+
+    # Heuristic: treat these as placeholders
+    is_placeholder_name = "placeholder" in path.name.lower()
+    is_empty_like = existing in ("", "todo", "tbd", "placeholder", "coming soon")
+
+    if overwrite or is_placeholder_name or is_empty_like:
+        path.write_text(content, encoding="utf-8")
+        print(f"[OVERWROTE PLACEHOLDER] {path}")
+    else:
+        print(f"[SKIPPED] {path} already contains non-placeholder content")
+
+
+def platform_modernization_architecture_md() -> str:
+    return textwrap.dedent("""
+    # Platform modernization blueprint architecture
+
+    This diagram captures a **cloud-native data platform modernization** journey that a Director of Data Engineering would lead: migrating from siloed, on-prem systems to a governed, scalable analytics platform on a modern cloud stack.
+
+    ```mermaid
+    flowchart LR
+        subgraph Source_Systems
+            ERP[(ERP)]
+            CRM[(CRM)]
+            LegacyDB[(Legacy DB)]
+        end
+
+        subgraph Ingestion
+            IngestBatch[Batch Ingestion\nADF / Fivetran]
+            IngestStream[Streaming Ingestion\nKafka / Event Hub]
+        end
+
+        subgraph Landing_Zone
+            RawBronze[(Raw / Bronze Storage)]
+        end
+
+        subgraph Processing
+            SparkJobs[Spark / Databricks Jobs]
+            DBT[dbt Transformations]
+        end
+
+        subgraph Curated_Layers
+            Silver[(Curated / Silver)]
+            Gold[(Gold / Semantic Models)]
+        end
+
+        subgraph Serving
+            BI[BI & Dashboards]
+            APIs[Data APIs]
+            DataScience[ML Workbenches]
+        end
+
+        subgraph Governance
+            Catalog[Data Catalog & Lineage]
+            Policies[Access Policies / RBAC]
+            Quality[Data Quality Checks]
+        end
+
+        Source_Systems --> IngestBatch --> RawBronze
+        Source_Systems --> IngestStream --> RawBronze
+
+        RawBronze --> SparkJobs --> Silver
+        Silver --> DBT --> Gold
+
+        Gold --> BI
+        Gold --> APIs
+        Silver --> DataScience
+
+        Catalog --- RawBronze
+        Catalog --- Silver
+        Catalog --- Gold
+
+        Quality --- RawBronze
+        Quality --- Silver
+        Quality --- Gold
+
+        Policies --- Serving
+    ```
+
+    ## Architecture narrative (Director-level)
+
+    **Objective:** Replace fragmented, on-prem data silos with a **scalable, governed platform** that can support analytics, self-service BI, and ML at enterprise scale.
+
+    **Key design decisions:**
+    - **Separation of concerns by layer:** Raw/Bronze for fidelity, Silver for conformed and cleansed data, Gold for business-ready aggregates and semantic models.
+    - **Batch + streaming ingestion:** Support both traditional workloads (daily ERP batches) and real-time use cases using Kafka or Event Hubs.
+    - **Transformation strategy:** Use Spark/Databricks for heavy-duty compute and dbt for SQL-centric, testable transformations close to the warehouse.
+    - **Governance by design:** Central catalog, lineage, and enforced RBAC are first-class; quality checks (e.g., Great Expectations) run at each layer.
+    - **Serving flexibility:** Multiple consumption patterns (BI, APIs, notebooks) share the same curated, governed data products.
+
+    ## Executive outcomes
+
+    - **Time-to-insight:** Reduced from weeks to hours by standardizing ingestion and curation.
+    - **Risk reduction:** PII access is controlled centrally with transparent audit and stewardship.
+    - **Change management:** Teams onboard via platform standards and reference architectures rather than bespoke pipelines.
+    """[1:]).strip() + "\n"
+
+
+def ai_ml_governance_architecture_md() -> str:
+    return textwrap.dedent("""
+    # AI and ML governance architecture
+
+    This diagram represents a **governed ML lifecycle** that balances innovation speed with control, ensuring models are compliant, monitored, and auditable.
+
+    ```mermaid
+    flowchart LR
+        subgraph Data_Governance
+            DataCatalog[Data Catalog]
+            DataPolicies[Data Access Policies]
+            DQ[Data Quality Rules]
+        end
+
+        subgraph Model_Development
+            FeatStore[Feature Store]
+            Experiment[Experiment Tracking]
+            Repo[Model Code Repo]
+        end
+
+        subgraph Governance_Services
+            PolicyEngine[AI Policy Engine]
+            RiskRegister[Model Risk Register]
+            ReviewBoard[Model Review Board]
+        end
+
+        subgraph Deployment
+            ModelRegistry[Model Registry]
+            CICD[CI/CD & Approval Gates]
+            ServingInfra[Online / Batch Serving]
+        end
+
+        subgraph Monitoring
+            PerfMon[Performance & Drift Monitoring]
+            Explainability[Explainability & Fairness Checks]
+            AuditLog[Audit Logging]
+        end
+
+        DataCatalog --> FeatStore
+        DataPolicies --> FeatStore
+        DQ --> FeatStore
+
+        FeatStore --> Experiment --> ModelRegistry
+        Repo --> CICD --> ModelRegistry
+
+        ModelRegistry --> PolicyEngine
+        PolicyEngine --> CICD
+
+        CICD --> ServingInfra
+        ServingInfra --> PerfMon
+        ServingInfra --> AuditLog
+
+        PerfMon --> ReviewBoard
+        Explainability --> ReviewBoard
+        RiskRegister --> ReviewBoard
+    ```
+
+    ## Governance narrative
+
+    **Scope:** All production ML models, including classical ML, deep learning, and LLM-powered systems, are governed through a consistent framework.
+
+    **Key principles:**
+    - **Single source of truth for models:** Model Registry holds lineage from data to code to deployed artifact.
+    - **Policy as code:** AI policies (e.g., fairness thresholds, prohibited use cases, data residency) are enforced automatically through a policy engine in CI/CD.
+    - **Documented risk posture:** Each model has a risk tier, approved use cases, and owners, stored in a Model Risk Register.
+    - **Continuous monitoring:** Performance, drift, and fairness metrics are tracked, with alerts feeding into a model review board for remediation decisions.
+
+    ## Director-level responsibilities
+
+    - Define the **governance operating model** (roles, RACI, review cadence).
+    - Drive **platform integration** between data catalog, CI/CD, model registry, and monitoring.
+    - Enforce **minimal but strong** controls that enable teams rather than blocking them.
+    """[1:]).strip() + "\n"
+
+
+def netflix_scale_pipeline_architecture_md() -> str:
+    return textwrap.dedent("""
+    # Netflix-scale streaming pipeline architecture
+
+    This pipeline simulates a **high-throughput event streaming architecture** for near real-time analytics, using a producer, a streaming backbone, and a Spark streaming job.
+
+    ```mermaid
+    flowchart LR
+        subgraph Producers
+            ClientApps[Client Apps\n(Web, Mobile, Devices)]
+            ProducerSim[producer_sim.py]
+        end
+
+        subgraph Streaming_Backbone
+            Kafka[(Kafka / Event Hub)]
+            Topics[(Event Topics)]
+        end
+
+        subgraph Processing
+            SparkJob[spark_streaming_job.py\n(Spark Structured Streaming)]
+            QoS[Quality & Schema Validation]
+        end
+
+        subgraph Storage
+            Bronze[(Raw Events / Bronze)]
+            Silver[(Validated Events / Silver)]
+            Gold[(Aggregated KPIs / Gold)]
+        end
+
+        subgraph Consumers
+            RealtimeDash[Real-time Dashboards]
+            FeatureStore[Feature Store]
+            BatchJobs[Downstream Batch Jobs]
+        end
+
+        ClientApps --> ProducerSim --> Kafka --> Topics
+        Topics --> SparkJob --> QoS
+
+        QoS --> Bronze
+        Bronze --> Silver
+        Silver --> Gold
+
+        Gold --> RealtimeDash
+        Gold --> FeatureStore
+        Gold --> BatchJobs
+    ```
+
+    ## Architecture narrative
+
+    **Volume & scale assumptions:**
+    - Tens of thousands of events per second per region.
+    - Ordering guarantees are best-effort within partition keys (e.g., account_id, device_id).
+    - Latency target: **sub-minute** end-to-end from event to dashboard.
+
+    **Key design decisions:**
+    - **Schema-first events:** Event schemas are versioned and validated (`test_event_schema.py`) to prevent bad data from impacting consumers.
+    - **Streaming backbone:** Kafka or Event Hubs provide durable, replayable logs supporting multiple independent consumers.
+    - **Streaming compute:** Spark Structured Streaming (in `spark_streaming_job.py`) handles windowed aggregations, watermarking, and stateful operations.
+    - **Layered storage:** Bronze retains raw events, Silver stores validated, partitioned data, and Gold holds pre-aggregated KPIs and session metrics.
+
+    ## Operational considerations (Director-level)
+
+    - **Multi-region strategy:** Topics are replicated or sharded by region; DR strategy is documented and tested.
+    - **Backpressure and failure modes:** Clear runbooks for lag, schema evolution, and poison-pill messages.
+    - **Cost management:** Tiered storage and compaction strategies balance retention with cost.
+    - **SLOs:** SLOs defined for latency, data freshness, and schema validation success rates; on-call is aligned with these metrics.
+    """[1:]).strip() + "\n"
+
+
+def dbt_test_placeholder_py() -> str:
+    return textwrap.dedent("""
+    import subprocess
+    import pathlib
+    import pytest
+
+    PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+    DBT_PROJECT_DIR = PROJECT_ROOT / "dbt_project"
+
+
+    @pytest.mark.integration
+    def test_dbt_models_build_successfully():
+        \"\"\"
+        Director-level sanity check:
+        - Ensures the dbt project is structurally valid.
+        - Validates that core models compile and run in the target environment.
+        This test is intentionally high-level and would normally run in CI.
+        \"\"\"
+        assert DBT_PROJECT_DIR.exists(), f"dbt_project directory not found at {DBT_PROJECT_DIR}"
+
+        # In a real environment, the profile/target would be configured via env vars or CI secrets.
+        result = subprocess.run(
+            ["dbt", "build", "--project-dir", str(DBT_PROJECT_DIR)],
+            capture_output=True,
+            text=True,
+        )
+
+        # Log output to help diagnose failures in CI.
+        print("STDOUT:\\n", result.stdout)
+        print("STDERR:\\n", result.stderr)
+
+        assert result.returncode == 0, "dbt build failed; see output above for details."
+    """[1:]).strip() + "\n"
+
+
+def main(overwrite: bool = False):
+    # 1. 01_platform_modernization_blueprint architecture placeholder
+    mod_arch_path = REPO_ROOT / "01_platform_modernization_blueprint" / "diagrams" / "architecture_placeholder.md"
+    write_file_if_placeholder(mod_arch_path, platform_modernization_architecture_md(), overwrite=overwrite)
+
+    # 2. 03_ai_ml_governance architecture placeholder
+    ai_gov_arch_path = REPO_ROOT / "03_ai_ml_governance" / "diagrams" / "architecture_placeholder.md"
+    write_file_if_placeholder(ai_gov_arch_path, ai_ml_governance_architecture_md(), overwrite=overwrite)
+
+    # 3. 05_netflix_scale_pipeline architecture placeholder
+    netflix_arch_path = REPO_ROOT / "05_netflix_scale_pipeline" / "diagrams" / "architecture_placeholder.md"
+    write_file_if_placeholder(netflix_arch_path, netflix_scale_pipeline_architecture_md(), overwrite=overwrite)
+
+    # 4. 06_dbt_warehouse_modeling test placeholder
+    dbt_test_path = REPO_ROOT / "06_dbt_warehouse_modeling" / "tests" / "test_placeholder.py"
+    write_file_if_placeholder(dbt_test_path, dbt_test_placeholder_py(), overwrite=overwrite)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate real artifacts to replace placeholders in the portfolio.")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Force overwrite even if files appear non-placeholder.",
+    )
+    args = parser.parse_args()
+    main(overwrite=args.overwrite)
