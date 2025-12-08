@@ -1,0 +1,238 @@
+import pandas as pd
+import numpy as np
+import random
+from datetime import datetime, timedelta
+import os
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+OUTPUT_DIR = "01_platform_modernization_blueprint/data"
+NUM_ROWS = 5000
+random.seed(42)
+np.random.seed(42)
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ============================================================
+# Helper Functions
+# ============================================================
+
+def random_date(start, end):
+    delta = end - start
+    return start + timedelta(seconds=random.randint(0, int(delta.total_seconds())))
+
+def random_choice_with_none(options, p_none=0.1):
+    return random.choice(options) if random.random() > p_none else None
+
+# ============================================================
+# 1. orders.csv
+# ============================================================
+
+def generate_orders(n=NUM_ROWS):
+    order_ids = [f"ORD-{i:06d}" for i in range(1, n+1)]
+    customer_ids = [f"CUST-{random.randint(1, 2000):05d}" for _ in range(n)]
+    start_date = datetime(2023, 1, 1)
+    end_date = datetime(2025, 12, 1)
+
+    df = pd.DataFrame({
+        "order_id": order_ids,
+        "customer_id": customer_ids,
+        "order_date": [random_date(start_date, end_date) for _ in range(n)],
+        "order_status": np.random.choice(["NEW", "PROCESSING", "SHIPPED", "DELIVERED", "CANCELLED"], n),
+        "order_total": np.round(np.random.uniform(20, 2000, n), 2),
+        "currency": np.random.choice(["USD", "EUR", "GBP"], n),
+        "sales_channel": np.random.choice(["ONLINE", "STORE", "DISTRIBUTOR"], n),
+        "shipping_method": np.random.choice(["STANDARD", "EXPRESS", "OVERNIGHT"], n),
+        "country": np.random.choice(["US", "UK", "DE", "FR", "CA"], n),
+        "promo_code": [random_choice_with_none(["HOLIDAY10", "WELCOME5", "SPRING20"], p_none=0.7) for _ in range(n)],
+        "created_timestamp": [datetime.now() for _ in range(n)]
+    })
+
+    df.to_csv(f"{OUTPUT_DIR}/orders.csv", index=False)
+    return df
+
+# ============================================================
+# 2. order_items.csv
+# ============================================================
+
+def generate_order_items(orders_df):
+    rows = []
+    for _, row in orders_df.iterrows():
+        for _ in range(random.randint(1, 5)):
+            rows.append({
+                "order_item_id": f"ITEM-{random.randint(1, 999999):06d}",
+                "order_id": row["order_id"],
+                "sku_id": f"SKU-{random.randint(1, 3000):05d}",
+                "quantity": random.randint(1, 10),
+                "unit_price": round(random.uniform(5, 500), 2),
+                "discount_amount": round(random.uniform(0, 50), 2),
+                "tax_amount": round(random.uniform(0, 20), 2)
+            })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(f"{OUTPUT_DIR}/order_items.csv", index=False)
+    return df
+
+# ============================================================
+# 3. sales_transactions.csv
+# ============================================================
+
+def generate_sales_transactions(n=NUM_ROWS):
+    df = pd.DataFrame({
+        "transaction_id": [f"TX-{i:06d}" for i in range(1, n+1)],
+        "store_id": [f"STORE-{random.randint(1, 200):04d}" for _ in range(n)],
+        "sku_id": [f"SKU-{random.randint(1, 3000):05d}" for _ in range(n)],
+        "transaction_timestamp": [random_date(datetime(2023,1,1), datetime(2025,12,1)) for _ in range(n)],
+        "quantity": np.random.randint(1, 10, n),
+        "unit_price": np.round(np.random.uniform(5, 500, n), 2),
+        "payment_method": np.random.choice(["CARD", "CASH", "ONLINE"], n),
+        "promo_code": [random_choice_with_none(["HOLIDAY10", "SPRING20"], p_none=0.8) for _ in range(n)]
+    })
+
+    df.to_csv(f"{OUTPUT_DIR}/sales_transactions.csv", index=False)
+    return df
+
+# ============================================================
+# 4. procurement_components.csv
+# ============================================================
+
+def generate_procurement_components(n=NUM_ROWS):
+    df = pd.DataFrame({
+        "procurement_id": [f"PROC-{i:06d}" for i in range(1, n+1)],
+        "component_id": [f"COMP-{random.randint(1, 5000):05d}" for _ in range(n)],
+        "supplier_id": [f"SUP-{random.randint(1, 500):04d}" for _ in range(n)],
+        "order_date": [random_date(datetime(2023,1,1), datetime(2025,12,1)) for _ in range(n)],
+        "expected_delivery_date": [random_date(datetime(2025,1,1), datetime(2026,12,1)) for _ in range(n)],
+        "quantity_ordered": np.random.randint(1, 500, n),
+        "unit_cost": np.round(np.random.uniform(1, 200, n), 2),
+        "status": np.random.choice(["ORDERED", "IN_TRANSIT", "DELIVERED", "CANCELLED"], n)
+    })
+
+    df.to_csv(f"{OUTPUT_DIR}/procurement_components.csv", index=False)
+    return df
+
+# ============================================================
+# 5. sku_master.csv
+# ============================================================
+
+def generate_sku_master(n=NUM_ROWS):
+    df = pd.DataFrame({
+        "sku_id": [f"SKU-{i:05d}" for i in range(1, n+1)],
+        "sku_name": [f"Product {i}" for i in range(1, n+1)],
+        "category": np.random.choice(["Electronics", "Apparel", "Home", "Tools"], n),
+        "subcategory": np.random.choice(["Premium", "Standard", "Budget"], n),
+        "unit_of_measure": np.random.choice(["EA", "BOX", "PACK"], n),
+        "standard_cost": np.round(np.random.uniform(1, 200, n), 2),
+        "list_price": np.round(np.random.uniform(5, 500, n), 2),
+        "active_flag": np.random.choice([True, False], n, p=[0.9, 0.1])
+    })
+
+    df.to_csv(f"{OUTPUT_DIR}/sku_master.csv", index=False)
+    return df
+
+# ============================================================
+# 6. supplier_master.csv
+# ============================================================
+
+def generate_supplier_master(n=NUM_ROWS):
+    df = pd.DataFrame({
+        "supplier_id": [f"SUP-{i:04d}" for i in range(1, n+1)],
+        "supplier_name": [f"Supplier {i}" for i in range(1, n+1)],
+        "country": np.random.choice(["US", "CN", "DE", "IN", "MX"], n),
+        "contact_email": [f"supplier{i}@example.com" for i in range(1, n+1)],
+        "rating": np.round(np.random.uniform(1, 5, n), 2),
+        "lead_time_days": np.random.randint(1, 60, n)
+    })
+
+    df.to_csv(f"{OUTPUT_DIR}/supplier_master.csv", index=False)
+    return df
+
+# ============================================================
+# 7. inventory_snapshots.csv
+# ============================================================
+
+def generate_inventory_snapshots(n=NUM_ROWS):
+    df = pd.DataFrame({
+        "snapshot_date": [random_date(datetime(2023,1,1), datetime(2025,12,1)).date() for _ in range(n)],
+        "facility_id": [f"FAC-{random.randint(1, 100):03d}" for _ in range(n)],
+        "sku_id": [f"SKU-{random.randint(1, 3000):05d}" for _ in range(n)],
+        "on_hand_qty": np.random.randint(0, 5000, n),
+        "reserved_qty": np.random.randint(0, 1000, n),
+        "available_qty": np.random.randint(0, 5000, n)
+    })
+
+    df.to_csv(f"{OUTPUT_DIR}/inventory_snapshots.csv", index=False)
+    return df
+
+# ============================================================
+# 8. customer_master.csv
+# ============================================================
+
+def generate_customer_master(n=NUM_ROWS):
+    df = pd.DataFrame({
+        "customer_id": [f"CUST-{i:05d}" for i in range(1, n+1)],
+        "customer_name": [f"Customer {i}" for i in range(1, n+1)],
+        "segment": np.random.choice(["Consumer", "Corporate", "SMB"], n),
+        "country": np.random.choice(["US", "UK", "DE", "FR", "CA"], n),
+        "signup_date": [random_date(datetime(2020,1,1), datetime(2025,1,1)) for _ in range(n)],
+        "lifetime_value": np.round(np.random.uniform(100, 50000, n), 2)
+    })
+
+    df.to_csv(f"{OUTPUT_DIR}/customer_master.csv", index=False)
+    return df
+
+# ============================================================
+# 9. returns.csv
+# ============================================================
+
+def generate_returns(n=NUM_ROWS):
+    df = pd.DataFrame({
+        "return_id": [f"RET-{i:06d}" for i in range(1, n+1)],
+        "order_id": [f"ORD-{random.randint(1, NUM_ROWS):06d}" for _ in range(n)],
+        "sku_id": [f"SKU-{random.randint(1, 3000):05d}" for _ in range(n)],
+        "return_date": [random_date(datetime(2023,1,1), datetime(2025,12,1)) for _ in range(n)],
+        "return_reason": np.random.choice(["DAMAGED", "NOT_AS_DESCRIBED", "SIZE_ISSUE", "NO_LONGER_NEEDED"], n),
+        "refund_amount": np.round(np.random.uniform(5, 500), 2),
+        "condition": np.random.choice(["NEW", "USED", "DAMAGED"], n)
+    })
+
+    df.to_csv(f"{OUTPUT_DIR}/returns.csv", index=False)
+    return df
+
+# ============================================================
+# 10. forecast_demand.csv
+# ============================================================
+
+def generate_forecast_demand(n=NUM_ROWS):
+    pred = np.random.randint(0, 1000, n)
+    lower = np.maximum(0, pred - np.random.randint(0, 100, n))
+    upper = pred + np.random.randint(0, 100, n)
+
+    df = pd.DataFrame({
+        "sku_id": [f"SKU-{random.randint(1, 3000):05d}" for _ in range(n)],
+        "forecast_date": [random_date(datetime(2023,1,1), datetime(2025,12,1)).date() for _ in range(n)],
+        "predicted_demand": pred,
+        "lower_bound": lower,
+        "upper_bound": upper
+    })
+
+    df.to_csv(f"{OUTPUT_DIR}/forecast_demand.csv", index=False)
+    return df
+
+
+if __name__ == "__main__":
+    # Generate datasets (orders first because order_items depends on it)
+    orders_df = generate_orders()
+    generate_order_items(orders_df)
+    generate_sales_transactions()
+    generate_procurement_components()
+    generate_sku_master()
+    generate_supplier_master()
+    generate_inventory_snapshots()
+    generate_customer_master()
+    generate_returns()
+    generate_forecast_demand()
+
+    print("Synthetic data generation complete. Files written to:", OUTPUT_DIR)

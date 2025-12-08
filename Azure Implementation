@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""
+Update script to populate Azure implementation with real artifacts.
+
+- Copies sample data from:
+    /workspaces/Taashi_Github/01_platform_modernization_blueprint/aws_implementation/sample_data/manufacturing_events.csv
+  into:
+    01_platform_modernization_blueprint/azure_implementation/sample_data/manufacturing_events.csv
+
+- Creates:
+    - ADF pipeline JSON: azure_implementation/adf_pipelines/pl_csv_to_medallion.json
+    - Databricks notebook (Py) for Bronze -> Silver:
+        azure_implementation/databricks_notebooks/bronze_to_silver.py
+    - Databricks notebook (Py) for Silver -> Gold:
+        azure_implementation/databricks_notebooks/silver_to_gold.py
+    - Synapse SQL script for Gold table:
+        azure_implementation/synapse_scripts/create_gold_table.sql
+    - Updated Azure README:
+        azure_implementation/README.md
+"""
+
+import json
+import shutil
+from pathlib import Path
+from datetime import datetime
+
+
+# Adjust this if your workspace path differs
+AWS_SAMPLE_SRC = Path(
+    "/workspaces/Taashi_Github/01_platform_modernization_blueprint/aws_implementation/sample_data/manufacturing_events.csv"
+)
+
+BASE_PATH = Path("01_platform_modernization_blueprint")
+AZURE_BASE = BASE_PATH / "azure_implementation"
+
+BRONZE_CONTAINER = "bronze"
+SILVER_CONTAINER = "silver"
+GOLD_CONTAINER = "gold"
+
+# These are logical paths inside ADLS, not local filesystem
+BRONZE_FOLDER = "manufacturing_events/bronze"
+SILVER_FOLDER = "manufacturing_events/silver"
+GOLD_FOLDER = "manufacturing_events/gold"
+
+
+def ensure_directories():
+    """Ensure Azure implementation directories exist."""
+    dirs = [
+        AZURE_BASE,
+        AZURE_BASE / "bronze",
+        AZURE_BASE / "silver",
+        AZURE_BASE / "gold",
+        AZURE_BASE / "adf_pipelines",
+        AZURE_BASE / "databricks_notebooks",
+        AZURE_BASE / "synapse_scripts",
+        AZURE_BASE / "sample_data",
+        AZURE_BASE / "tests",
+    ]
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+
+def copy_sample_data():
+    """Copy AWS sample CSV into Azure sample_data folder."""
+    if not AWS_SAMPLE_SRC.exists():
+        raise FileNotFoundError(f"Source sample data not found: {AWS_SAMPLE_SRC}")
+
+    dest = AZURE_BASE / "sample_data" / "manufacturing_events.csv"
+    shutil.copy2(AWS_SAMPLE_SRC, dest)
+    print(f"✓ Copied sample data to Azure: {dest}")
+
+
+def create_adf_pipeline():
+    """
+    Create a real ADF pipeline JSON that:
+    - Reads from the Azure 'sample_data' folder in ADLS (assumed ingested from local CSV)
+    - Writes to Bronze (Parquet)
+    - Triggers a Databricks notebook for Bronze -> Silver
+    - Triggers a Databricks notebook for Silver -> Gold
+    """
+    pipeline = {
+        "name": "pl_csv_to_medallion",
+        "properties": {
+            "description": "Ingest CSV sample data and apply Medallion transformations via Databricks notebooks.",
+            "activities": [
+                {
+                    "name": "Copy_CSV_to_Bronze",
+                    "type": "Copy",
+                    "dependsOn": [],
+                    "policy": {"timeout": "02:00:00", "retry": 1, "retryIntervalInSeconds": 30},
+                    "inputs": [
+                        {
+                            "referenceName": "ds_csv_local_sample",
+                            "type": "DatasetReference",
+                        }
+                    ],
+                    "outputs": [
+                        {
+                            "referenceName": "ds_adls_bronze_parquet",
+                            "type": "DatasetReference",
+                        }
+                    ],
+                    "typeProperties": {
+                        "source": {
+                            "type": "DelimitedTextSource",
+                            "treatEmptyAsNull": True,
+                            "skipHeaderLineCount": 1,
+                        },
+                        "sink": {
+                            "type": "ParquetSink",
+                            "storeSettings": {"type": "AzureBlobFSWriteSettings"},
+                            "formatSettings": {"type": "ParquetFormat"},
+                        }
+                    }
+                },
+                {
+                    "name": "Notebook_Bronze_to_Silver",
+                    "type": "DatabricksNotebook",
+                    "dependsOn": [
+                        {
+                            "activity": "Copy_CSV_to_Bronze",
+                            "dependencyConditions": ["Succeeded"],
+                        }
+                    ],
+                    "typeProperties": {
+                        "notebookPath": "/Shared/bronze_to_silver",
+                        "baseParameters": {
+                            "bronze_path": f"abfss://{BRONZE_CONTAINER}@<STORAGE_ACCOUNT>.dfs.core.windows.net/{BRONZE_FOLDER}",
+                            "silver_path": f"abfss://{SILVER_CONTAINER}@<STORAGE_ACCOUNT>.dfs.core.windows.net/{SILVER_FOLDER}",
+                        },
+                    },
+                    "linkedServiceName": {
+                        "referenceName": "ls_azure_databricks",
+                        "type": "LinkedServiceReference",
+                    },
+                },
+                {
+                    "name": "Notebook_Silver_to_Gold",
+                    "type": "DatabricksNotebook",
+                    "dependsOn": [
+                        {
+                            "activity": "Notebook_Bronze_to_Silver",
+                            "dependencyConditions": ["Succeeded"],
+                        }
+                    ],
+                    "typeProperties": {
+                        "notebookPath": "/Shared/silver_to_gold",
+                        "baseParameters": {
+                            "silver_path": f"abfss://{SILVER_CONTAINER}@<STORAGE_ACCOUNT>.dfs.core.windows.net/{SILVER_FOLDER}",
+                            "gold_path": f"abfss://{GOLD_CONTAINER}@<STORAGE_ACCOUNT>.dfs.core.windows.net/{GOLD_FOLDER}",
+                        },
+                    },
+                    "linkedServiceName": {
+                        "referenceName": "ls_azure_databricks",
+                        "type": "LinkedServiceReference",
+                    },
+                },
+            ],
+            "parameters": {
+                "RunId": {"type": "String", "defaultValue": "manual_run"},
+            },
+            "annotations": ["medallion", "sample", "csv", "databricks"],
+        },
+    }
+
+    path = AZURE_BASE / "adf_pipelines" / "pl_csv_to_medallion.json"
+    path.write_text(json.dumps(pipeline, indent=2), encoding="utf-8")
+    print(f"✓ Created ADF pipeline: {path}")
+
+
+def create_bronze_to_silver_notebook():
+    """
+    Databricks notebook (Py) that:
+    - reads Bronze Parquet (from ADLS)
+    - cleans and standardizes data
+    - writes Silver as Delta
+    """
+    content = """# Databricks notebook source
+# Bronze -> Silver transformation for manufacturing events
+
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+from pyspark.sql import SparkSession
+
+# Use dbutils.widgets in Databricks to parameterize paths
+# In ADF, these map to baseParameters.
+bronze_path = dbutils.widgets.get("bronze_path") if "bronze_path" in dbutils.widgets.getArgumentNames() else "abfss://bronze@<STORAGE_ACCOUNT>.dfs.core.windows.net/manufacturing_events/bronze"
+silver_path = dbutils.widgets.get("silver_path") if "silver_path" in dbutils.widgets.getArgumentNames() else "abfss://silver@<STORAGE_ACCOUNT>.dfs.core.windows.net/manufacturing_events/silver"
+
+spark = SparkSession.builder.getOrCreate()
+
+print(f"Reading Bronze data from: {bronze_path}")
+df_bronze = spark.read.parquet(bronze_path)
+print(f"Bronze records: {df_bronze.count()}")
+
+# Basic cleansing and standardization
+df_silver = (
+    df_bronze
+    .withColumn("timestamp", F.to_timestamp("timestamp", "yyyy-MM-dd HH:mm:ss"))
+    .filter(F.col("timestamp").isNotNull())
+    .filter(F.col("device_id").isNotNull())
+    .withColumn("device_id", F.upper(F.trim("device_id")))
+    .withColumn("facility_id", F.upper(F.trim("facility_id")))
+    .withColumn(
+        "temperature_c",
+        F.col("temperature").cast("double"),
+    )
+    .withColumn(
+        "pressure_kpa",
+        F.col("pressure").cast("double"),
+    )
+    .withColumn(
+        "vibration_mm_s",
+        F.col("vibration").cast("double"),
+    )
+    .withColumn("production_rate", F.col("production_rate").cast("int"))
+    .withColumn("quality_score", F.col("quality_score").cast("double"))
+    .withColumn("processed_timestamp", F.current_timestamp())
+    .withColumn("process_date", F.to_date("timestamp"))
+    .dropDuplicates(["timestamp", "device_id"])
+)
+
+print(f"Silver records after cleansing: {df_silver.count()}")
+
+(
+    df_silver.write
+    .format("delta")
+    .mode("overwrite")
+    .partitionBy("process_date", "facility_id")
+    .save(silver_path)
+)
+
+print(f"✓ Silver data written to: {silver_path}")
+"""
+
+    path = AZURE_BASE / "databricks_notebooks" / "bronze_to_silver.py"
+    path.write_text(content, encoding="utf-8")
+    print(f"✓ Created Databricks notebook (Bronze->Silver): {path}")
+
+
+def create_silver_to_gold_notebook():
+    """
+    Databricks notebook (Py) that:
+    - reads Silver Delta
+    - aggregates and renames columns into user-friendly Gold table
+    """
+    content = """# Databricks notebook source
+# Silver -> Gold transformation for manufacturing events
+
+from pyspark.sql import functions as F
+from pyspark.sql import SparkSession
+
+silver_path = dbutils.widgets.get("silver_path") if "silver_path" in dbutils.widgets.getArgumentNames() else "abfss://silver@<STORAGE_ACCOUNT>.dfs.core.windows.net/manufacturing_events/silver"
+gold_path = dbutils.widgets.get("gold_path") if "gold_path" in dbutils.widgets.getArgumentNames() else "abfss://gold@<STORAGE_ACCOUNT>.dfs.core.windows.net/manufacturing_events/gold"
+
+spark = SparkSession.builder.getOrCreate()
+
+print(f"Reading Silver data from: {silver_path}")
+df_silver = spark.read.format("delta").load(silver_path)
+print(f"Silver records: {df_silver.count()}")
+
+# Example: aggregate to hourly metrics per device and facility
+df_gold = (
+    df_silver
+    .withColumn("event_hour", F.date_trunc("HOUR", F.col("timestamp")))
+    .groupBy("event_hour", "device_id", "facility_id")
+    .agg(
+        F.count("*").alias("events_count"),
+        F.avg("temperature_c").alias("avg_temperature_c"),
+        F.avg("pressure_kpa").alias("avg_pressure_kpa"),
+        F.avg("vibration_mm_s").alias("avg_vibration_mm_s"),
+        F.avg("production_rate").alias("avg_units_per_hour"),
+        F.avg("quality_score").alias("avg_quality_score"),
+        F.sum(F.when(F.col("status") == "WARNING", 1).otherwise(0)).alias("warning_events"),
+        F.sum(F.when(F.col("status") == "CRITICAL", 1).otherwise(0)).alias("critical_events"),
+    )
+    .withColumnRenamed("event_hour", "hour_start")
+    .withColumn("is_high_quality", F.col("avg_quality_score") >= 95.0)
+    .withColumn("is_high_risk", F.col("critical_events") > 0)
+)
+
+print(f"Gold records: {df_gold.count()}")
+
+(
+    df_gold.write
+    .format("delta")
+    .mode("overwrite")
+    .save(gold_path)
+)
+
+print(f"✓ Gold data written to: {gold_path}")
+"""
+
+    path = AZURE_BASE / "databricks_notebooks" / "silver_to_gold.py"
+    path.write_text(content, encoding="utf-8")
+    print(f"✓ Created Databricks notebook (Silver->Gold): {path}")
+
+
+def create_synapse_gold_sql():
+    """
+    Synapse SQL script that reads from Gold Delta and exposes a final table.
+    Assumes external table or OPENROWSET to Delta Lake in ADLS.
+    """
+    content = f"""-- Synapse Gold table for manufacturing device hourly metrics
+
+CREATE DATABASE IF NOT EXISTS gold_manufacturing;
+GO
+
+USE gold_manufacturing;
+GO
+
+IF OBJECT_ID('dbo.fact_device_metrics_hourly', 'U') IS NOT NULL
+    DROP TABLE dbo.fact_device_metrics_hourly;
+GO
+
+CREATE TABLE dbo.fact_device_metrics_hourly
+(
+    metric_id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    hour_start DATETIME2 NOT NULL,
+    device_id NVARCHAR(50) NOT NULL,
+    facility_id NVARCHAR(50) NOT NULL,
+    events_count INT,
+    avg_temperature_c DECIMAL(10,2),
+    avg_pressure_kpa DECIMAL(10,2),
+    avg_vibration_mm_s DECIMAL(10,2),
+    avg_units_per_hour DECIMAL(10,2),
+    avg_quality_score DECIMAL(10,2),
+    warning_events INT,
+    critical_events INT,
+    is_high_quality BIT,
+    is_high_risk BIT,
+    created_at DATETIME2 DEFAULT SYSUTCDATETIME()
+)
+WITH
+(
+    DISTRIBUTION = HASH(device_id),
+    CLUSTERED COLUMNSTORE INDEX
+);
+GO
+
+-- Example query to read from Delta in ADLS and populate the table.
+-- Replace <STORAGE_ACCOUNT> with your actual storage account name.
+TRUNCATE TABLE dbo.fact_device_metrics_hourly;
+GO
+
+INSERT INTO dbo.fact_device_metrics_hourly
+(
+    hour_start,
+    device_id,
+    facility_id,
+    events_count,
+    avg_temperature_c,
+    avg_pressure_kpa,
+    avg_vibration_mm_s,
+    avg_units_per_hour,
+    avg_quality_score,
+    warning_events,
+    critical_events,
+    is_high_quality,
+    is_high_risk
+)
+SELECT
+    hour_start,
+    device_id,
+    facility_id,
+    events_count,
+    avg_temperature_c,
+    avg_pressure_kpa,
+    avg_vibration_mm_s,
+    avg_units_per_hour,
+    avg_quality_score,
+    warning_events,
+    critical_events,
+    CAST(is_high_quality AS BIT) AS is_high_quality,
+    CAST(is_high_risk AS BIT) AS is_high_risk
+FROM
+    OPENROWSET(
+        BULK 'https://<STORAGE_ACCOUNT>.dfs.core.windows.net/gold/{GOLD_FOLDER}/',
+        FORMAT = 'DELTA'
+    ) AS gold_data;
+GO
+"""
+    path = AZURE_BASE / "synapse_scripts" / "create_gold_table.sql"
+    path.write_text(content, encoding="utf-8")
+    print(f"✓ Created Synapse Gold script: {path}")
+
+
+def update_azure_readme():
+    """Update Azure README with a concrete pipeline + notebook walkthrough."""
+    now = datetime.utcnow().strftime("%Y-%m-%d")
+
+    content = f"""# Azure Platform Modernization Implementation
+
+## Overview
+
+This folder contains a concrete, runnable example of a Medallion Architecture on Azure using **real sample data** and **real artifacts**:
+
+- Source CSV: `aws_implementation/sample_data/manufacturing_events.csv` (copied locally into this folder)
+- Azure Data Factory pipeline: `adf_pipelines/pl_csv_to_medallion.json`
+- Azure Databricks notebooks:
+  - `databricks_notebooks/bronze_to_silver.py`
+  - `databricks_notebooks/silver_to_gold.py`
+- Azure Synapse SQL script:
+  - `synapse_scripts/create_gold_table.sql`
+
+The design follows **Bronze → Silver → Gold**:
+
+- **Bronze**: Raw Parquet landing
+- **Silver**: Cleaned + standardized Delta Lake
+- **Gold**: Hourly device metrics with friendly column names and business logic
+
+---
+
+## End-to-End Flow
+
+1. **Sample Data Copy**
+
+   The script `update_azure_modernization.py` copies the canonical sample data from:
+
+   ```text
+   /workspaces/Taashi_Github/01_platform_modernization_blueprint/aws_implementation/sample_data/manufacturing_events.csv

@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""
+Update script to populate AWS implementation with real artifacts.
+
+Populates:
+  01_platform_modernization_blueprint/aws_implementation/
+
+Creates/updates:
+  - Lambda ingestion function:
+      aws_implementation/lambda_functions/ingest_events.py
+  - Glue ETL job (Bronze -> Silver):
+      aws_implementation/glue_jobs/bronze_to_silver.py
+  - Athena SQL for Gold table:
+      aws_implementation/athena_sql/create_gold_tables.sql
+  - Updated AWS README:
+      aws_implementation/README.md
+
+Assumes sample data already exists at:
+  01_platform_modernization_blueprint/aws_implementation/sample_data/manufacturing_events.csv
+"""
+
+from pathlib import Path
+from datetime import datetime
+
+
+BASE_PATH = Path("01_platform_modernization_blueprint")
+AWS_BASE = BASE_PATH / "aws_implementation"
+
+BRONZE_PREFIX = "manufacturing_events/bronze/"
+SILVER_PREFIX = "manufacturing_events/silver/"
+GOLD_PREFIX = "manufacturing_events/gold/"
+
+
+def ensure_directories():
+    """Ensure AWS implementation directories exist."""
+    dirs = [
+        AWS_BASE,
+        AWS_BASE / "bronze",
+        AWS_BASE / "silver",
+        AWS_BASE / "gold",
+        AWS_BASE / "glue_jobs",
+        AWS_BASE / "lambda_functions",
+        AWS_BASE / "athena_sql",
+        AWS_BASE / "sample_data",
+        AWS_BASE / "tests",
+    ]
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+
+def create_lambda_ingest():
+    """
+    Create a Lambda ingestion function that:
+    - Accepts events (e.g., from API Gateway or Kinesis)
+    - Writes them as CSV to a Bronze S3 prefix
+    """
+    content = '''"""
+Lambda function to ingest manufacturing events into Bronze S3 layer.
+
+This function expects either:
+- Kinesis events with JSON payloads, or
+- Direct "event" with JSON records for testing.
+
+It writes a CSV file into the Bronze prefix in S3.
+"""
+
+import csv
+import json
+from datetime import datetime
+from io import StringIO
+
+import boto3
+
+
+s3 = boto3.client("s3")
+
+# Replace with your real bucket name, e.g. "data-platform-123456789012-bronze"
+BRONZE_BUCKET = "data-platform-<ACCOUNT_ID>-bronze"
+BRONZE_PREFIX = "manufacturing_events/bronze/"
+
+
+def _records_from_kinesis(event):
+    import base64
+    records = []
+    for record in event.get("Records", []):
+        kinesis = record.get("kinesis")
+        if not kinesis:
+            continue
+        payload = base64.b64decode(kinesis["data"]).decode("utf-8")
+        records.append(json.loads(payload))
+    return records
+
+
+def _records_from_direct_event(event):
+    if isinstance(event, list):
+        return event
+    if isinstance(event, dict) and "records" in event:
+        return event["records"]
+    return [event]
+
+
+def lambda_handler(event, context):
+    try:
+        if "Records" in event and "kinesis" in event["Records"][0]:
+            records = _records_from_kinesis(event)
+        else:
+            records = _records_from_direct_event(event)
+
+        if not records:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "No records to ingest"})
+            }
+
+        # Convert to CSV
+        ts = datetime.utcnow()
+        date_prefix = ts.strftime("%Y/%m/%d")
+        hour = ts.strftime("%H")
+
+        csv_buffer = StringIO()
+        fieldnames = list(records[0].keys())
+        writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(records)
+
+        key = f"{BRONZE_PREFIX}{date_prefix}/{hour}/events_{ts.strftime('%Y%m%d%H%M%S')}.csv"
+
+        s3.put_object(
+            Bucket=BRONZE_BUCKET,
+            Key=key,
+            Body=csv_buffer.getvalue().encode("utf-8"),
+            ContentType="text/csv",
+        )
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps(
+                {"message": f"Ingested {len(records)} records", "location": f"s3://{BRONZE_BUCKET}/{key}"}
+            ),
+        }
+    except Exception as exc:
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(exc)})
+        }
+'''
+    path = AWS_BASE / "lambda_functions" / "ingest_events.py"
+    path.write_text(content, encoding="utf-8")
+    print(f"✓ Created Lambda ingestion function: {path}")
+
+
+def create_glue_bronze_to_silver():
+    """
+    Create Glue ETL job script that:
+    - Reads CSV from Bronze S3 (manufacturing_events/bronze/)
+    - Cleans and standardizes
+    - Writes partitioned Parquet to Silver S3 (manufacturing_events/silver/)
+    """
+    content = '''"""
+Glue ETL job: Bronze -> Silver for manufacturing events.
+
+Reads CSV from S3 Bronze prefix:
+  s3://data-platform-<ACCOUNT_ID>-bronze/manufacturing_events/bronze/
+
+Writes Parquet to S3 Silver prefix:
+  s3://data-platform-<ACCOUNT_ID>-silver/manufacturing_events/silver/
+"""
+
+import sys
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from pyspark.sql import functions as F
+
+
+args = getResolvedOptions(sys.argv, ["JOB_NAME", "BRONZE_BUCKET", "SILVER_BUCKET"])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
+
+BRONZE_PATH = f"s3://{args['BRONZE_BUCKET']}/manufacturing_events/bronze/"
+SILVER_PATH = f"s3://{args['SILVER_BUCKET']}/manufacturing_events/silver/"
+
+print(f"Reading Bronze data from: {BRONZE_PATH}")
+
+df_bronze = (
+    spark.read
+    .option("header", "true")
+    .option("inferSchema", "true")
+    .csv(BRONZE_PATH)
+)
+
+print(f"Bronze record count: {df_bronze.count()}")
+
+df_silver = (
+    df_bronze
+    .withColumn("timestamp", F.to_timestamp("timestamp", "yyyy-MM-dd HH:mm:ss"))
+    .filter(F.col("timestamp").isNotNull())
+    .filter(F.col("device_id").isNotNull())
+    .withColumn("device_id", F.upper(F.trim("device_id")))
+    .withColumn("facility_id", F.upper(F.trim("facility_id")))
+    .withColumn("temperature_c", F.col("temperature").cast("double"))
+    .withColumn("pressure_kpa", F.col("pressure").cast("double"))
+    .withColumn("vibration_mm_s", F.col("vibration").cast("double"))
+    .withColumn("production_rate", F.col("production_rate").cast("int"))
+    .withColumn("quality_score", F.col("quality_score").cast("double"))
+    .withColumn("process_date", F.to_date("timestamp"))
+    .withColumn("processed_timestamp", F.current_timestamp())
+    .dropDuplicates(["timestamp", "device_id"])
+)
+
+print(f"Silver record count: {df_silver.count()}")
+
+(
+    df_silver
+    .write
+    .mode("overwrite")
+    .partitionBy("process_date", "facility_id")
+    .parquet(SILVER_PATH)
+)
+
+print(f"✓ Wrote Silver data to: {SILVER_PATH}")
+
+job.commit()
+'''
+    path = AWS_BASE / "glue_jobs" / "bronze_to_silver.py"
+    path.write_text(content, encoding="utf-8")
+    print(f"✓ Created Glue ETL job (Bronze->Silver): {path}")
+
+
+def create_athena_gold_sql():
+    """
+    Create Athena SQL that:
+    - Defines an external table over the Silver Parquet
+    - Materializes a Gold table with user-friendly names and metrics
+    """
+    content = f"""-- Athena SQL for Silver external table and Gold CTAS
+
+-- 1) External table over Silver data
+CREATE EXTERNAL TABLE IF NOT EXISTS silver_manufacturing_events (
+  timestamp                    timestamp,
+  device_id                    string,
+  facility_id                  string,
+  temperature_c                double,
+  pressure_kpa                 double,
+  vibration_mm_s               double,
+  status                       string,
+  production_rate              int,
+  quality_score                double,
+  processed_timestamp          timestamp
+)
+PARTITIONED BY (
+  process_date                 date,
+  facility_id_partition        string
+)
+STORED AS PARQUET
+LOCATION 's3://data-platform-<ACCOUNT_ID>-silver/{SILVER_PREFIX}'
+TBLPROPERTIES ('parquet.compression'='SNAPPY');
+
+-- If you use partitioned folders like process_date=YYYY-MM-DD/facility_id=FAC_XXX,
+-- then set up partition projection or MSCK REPAIR TABLE accordingly.
+-- Example:
+-- MSCK REPAIR TABLE silver_manufacturing_events;
+
+
+-- 2) Gold CTAS: hourly device metrics with user-friendly columns
+
+CREATE TABLE IF NOT EXISTS gold_device_metrics_hourly
+WITH (
+  format = 'PARQUET',
+  external_location = 's3://data-platform-<ACCOUNT_ID>-gold/{GOLD_PREFIX}',
+  partitioned_by = ARRAY['date_partition']
+) AS
+SELECT
+  date_trunc('hour', timestamp)                      AS hour_start,
+  device_id                                          AS device_id,
+  facility_id                                        AS facility_id,
+  COUNT(*)                                           AS events_count,
+  AVG(temperature_c)                                 AS avg_temperature_c,
+  AVG(pressure_kpa)                                  AS avg_pressure_kpa,
+  AVG(vibration_mm_s)                                AS avg_vibration_mm_s,
+  AVG(production_rate)                               AS avg_units_per_hour,
+  AVG(quality_score)                                 AS avg_quality_score,
+  SUM(CASE WHEN status = 'WARNING' THEN 1 ELSE 0 END) AS warning_events,
+  SUM(CASE WHEN status = 'CRITICAL' THEN 1 ELSE 0 END) AS critical_events,
+  CASE WHEN AVG(quality_score) >= 95.0 THEN true ELSE false END AS is_high_quality,
+  CASE WHEN SUM(CASE WHEN status = 'CRITICAL' THEN 1 ELSE 0 END) > 0
+       THEN true ELSE false END AS is_high_risk,
+  CAST(date_trunc('day', timestamp) AS date)         AS date_partition
+FROM silver_manufacturing_events
+GROUP BY
+  date_trunc('hour', timestamp),
+  device_id,
+  facility_id,
+  CAST(date_trunc('day', timestamp) AS date);
+"""
+    path = AWS_BASE / "athena_sql" / "create_gold_tables.sql"
+    path.write_text(content, encoding="utf-8")
+    print(f"✓ Created Athena Gold SQL: {path}")
+
+
+def update_aws_readme():
+    """Update AWS README with a concrete medallion walkthrough."""
+    now = datetime.utcnow().strftime("%Y-%m-%d")
+
+    content = f"""# AWS Platform Modernization Implementation
+
+## Overview
+
+This folder contains a concrete Medallion-style data platform on AWS:
+
+- **Bronze**: Raw CSV events in S3
+- **Silver**: Cleaned, standardized Parquet in S3
+- **Gold**: Hourly device metrics in S3, queried via Athena
+
+Core tools:
+
+- Amazon S3
+- AWS Lambda
+- AWS Glue
+- Amazon Athena
+
+---
+
+## Sample Data
+
+The canonical manufacturing IoT sample data lives at:
+
+- `aws_implementation/sample_data/manufacturing_events.csv`
+
+Typical columns:
+
+- `timestamp`, `device_id`, `facility_id`, `temperature`, `pressure`,
+  `vibration`, `status`, `production_rate`, `quality_score`
+
+---
+
+## End-to-End Flow
+
+### 1. Lambda Ingestion (to Bronze)
+
+File: `lambda_functions/ingest_events.py`
+
+- Accepts JSON events (from Kinesis, API Gateway, or direct calls)
+- Converts them to CSV
+- Writes to:
+
+```text
+s3://data-platform-<ACCOUNT_ID>-bronze/{BRONZE_PREFIX}YYYY/MM/DD/HH/events_YYYYMMDDHHMMSS.csv

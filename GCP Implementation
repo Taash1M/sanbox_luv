@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+"""
+Update script to populate GCP implementation with real artifacts.
+
+Populates:
+  01_platform_modernization_blueprint/gcp_implementation/
+
+Creates/updates:
+  - Dataflow ingestion pipeline (CSV -> Bronze GCS):
+      gcp_implementation/dataflow_pipelines/ingest_to_bronze.py
+  - Dataflow ETL pipeline (Bronze -> Silver Parquet):
+      gcp_implementation/dataflow_pipelines/bronze_to_silver.py
+  - BigQuery SQL for Silver/Gold tables:
+      gcp_implementation/bigquery_sql/create_silver_and_gold_tables.sql
+  - Updated GCP README:
+      gcp_implementation/README.md
+
+Assumes sample data already exists at:
+  01_platform_modernization_blueprint/gcp_implementation/sample_data/manufacturing_events.csv
+"""
+
+from pathlib import Path
+from datetime import datetime
+
+
+BASE_PATH = Path("01_platform_modernization_blueprint")
+GCP_BASE = BASE_PATH / "gcp_implementation"
+
+BRONZE_PREFIX = "manufacturing_events/bronze/"
+SILVER_PREFIX = "manufacturing_events/silver/"
+GOLD_PREFIX = "manufacturing_events/gold/"
+
+
+def ensure_directories():
+    """Ensure GCP implementation directories exist."""
+    dirs = [
+        GCP_BASE,
+        GCP_BASE / "bronze",
+        GCP_BASE / "silver",
+        GCP_BASE / "gold",
+        GCP_BASE / "dataflow_pipelines",
+        GCP_BASE / "bigquery_sql",
+        GCP_BASE / "sample_data",
+        GCP_BASE / "tests",
+    ]
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+
+def create_dataflow_ingest_to_bronze():
+    """
+    Create a Dataflow (Apache Beam) pipeline that:
+    - Reads local CSV (or GCS CSV)
+    - Normalizes to JSON-like dicts
+    - Writes line-delimited JSON files to GCS Bronze
+    """
+    content = '''"""
+Dataflow pipeline: Ingest manufacturing CSV -> Bronze (JSON in GCS).
+
+Usage example (from local or GCS CSV):
+
+    python ingest_to_bronze.py \\
+      --project=<YOUR_PROJECT_ID> \\
+      --region=us-central1 \\
+      --runner=DataflowRunner \\
+      --temp_location=gs://<YOUR_BUCKET>/dataflow/temp \\
+      --staging_location=gs://<YOUR_BUCKET>/dataflow/staging \\
+      --input=gs://<YOUR_BUCKET>/sample_data/manufacturing_events.csv \\
+      --output_prefix=gs://<YOUR_BUCKET>/''' + BRONZE_PREFIX + '''events
+
+This writes files like:
+  gs://<YOUR_BUCKET>/''' + BRONZE_PREFIX + '''events-00000-of-00005.json
+"""
+
+import argparse
+import csv
+import json
+
+import apache_beam as beam
+from apache_beam.options.pipeline_options import PipelineOptions
+
+
+class CsvToDict(beam.DoFn):
+    def __init__(self, has_header=True):
+        self.has_header = has_header
+
+    def process(self, element):
+        # element is a line of CSV. We use the header from side input if present.
+        # This is a simplified example; in production, consider proper schema handling.
+        line = element
+        # The header handling here is naive; in many patterns you'd load header separately.
+        # For this demo we assume CSV with header is pre-parsed or we read via TextIO + csv.
+        raise NotImplementedError("This template is for illustrative structure; replace with your own CSV parsing logic.")
+
+
+def run(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True, help="Input CSV path (GCS).")
+    parser.add_argument("--output_prefix", required=True, help="Output prefix in GCS for Bronze JSON.")
+    known_args, pipeline_args = parser.parse_known_args(argv)
+
+    pipeline_options = PipelineOptions(
+        pipeline_args,
+        save_main_session=True,
+        streaming=False,
+    )
+
+    # For practical usage, you'll likely use beam.io.ReadFromText + csv.DictReader in a DoFn.
+    with beam.Pipeline(options=pipeline_options) as p:
+        (
+            p
+            | "ReadCSV" >> beam.io.ReadFromText(known_args.input, skip_header_lines=1)
+            | "ParseCSV" >> beam.Map(lambda line: dict(zip(
+                ["timestamp", "device_id", "facility_id", "temperature", "pressure", "vibration", "status", "production_rate", "quality_score"],
+                next(csv.reader([line]))
+            )))
+            | "ToJSON" >> beam.Map(json.dumps)
+            | "WriteJSON" >> beam.io.WriteToText(
+                known_args.output_prefix,
+                file_name_suffix=".json",
+                shard_name_template="-SSSSS-of-NNNNN",
+            )
+        )
+
+
+if __name__ == "__main__":
+    run()
+'''
+    path = GCP_BASE / "dataflow_pipelines" / "ingest_to_bronze.py"
+    path.write_text(content, encoding="utf-8")
+    print(f"✓ Created Dataflow ingestion pipeline: {path}")
+
+
+def create_dataflow_bronze_to_silver():
+    """
+    Create a Dataflow (Apache Beam) pipeline that:
+    - Reads Bronze JSON from GCS
+    - Cleans and standardizes data
+    - Writes Parquet files to Silver GCS
+    """
+    content = '''"""
+Dataflow pipeline: Bronze (JSON) -> Silver (Parquet).
+
+Reads JSON lines from:
+  gs://<YOUR_BUCKET>/''' + BRONZE_PREFIX + '''...
+
+Writes partitioned Parquet to:
+  gs://<YOUR_BUCKET>/''' + SILVER_PREFIX + '''
+"""
+
+import argparse
+import json
+from datetime import datetime
+
+import apache_beam as beam
+from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.io.gcp.internal.clients import bigquery
+
+
+def parse_json(line):
+    record = json.loads(line)
+    # Basic casting and normalization; enhance as needed
+    def safe_float(v):
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    def safe_int(v):
+        try:
+            return int(v)
+        except Exception:
+            return None
+
+    ts_str = record.get("timestamp")
+    try:
+        ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        ts = None
+
+    return {
+        "timestamp": ts_str,
+        "device_id": (record.get("device_id") or "").strip().upper(),
+        "facility_id": (record.get("facility_id") or "").strip().upper(),
+        "temperature_c": safe_float(record.get("temperature")),
+        "pressure_kpa": safe_float(record.get("pressure")),
+        "vibration_mm_s": safe_float(record.get("vibration")),
+        "status": record.get("status"),
+        "production_rate": safe_int(record.get("production_rate")),
+        "quality_score": safe_float(record.get("quality_score")),
+        "process_date": ts.date().isoformat() if ts else None,
+        "processed_timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+def run(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input_prefix", required=True, help="Input Bronze JSON prefix (GCS).")
+    parser.add_argument("--output_prefix", required=True, help="Output Silver Parquet prefix (GCS).")
+    known_args, pipeline_args = parser.parse_known_args(argv)
+
+    pipeline_options = PipelineOptions(
+        pipeline_args,
+        save_main_session=True,
+        streaming=False,
+    )
+
+    with beam.Pipeline(options=pipeline_options) as p:
+        records = (
+            p
+            | "ReadBronzeJSON" >> beam.io.ReadFromText(known_args.input_prefix + "*.json")
+            | "ParseJSON" >> beam.Map(parse_json)
+        )
+
+        # In practice, to write Parquet you'll use a ParquetIO sink or bq load.
+        # Here we demonstrate writing to BigQuery as Silver; adjust to Parquet if needed.
+
+        table_schema = {
+            "fields": [
+                {"name": "timestamp", "type": "TIMESTAMP"},
+                {"name": "device_id", "type": "STRING"},
+                {"name": "facility_id", "type": "STRING"},
+                {"name": "temperature_c", "type": "FLOAT"},
+                {"name": "pressure_kpa", "type": "FLOAT"},
+                {"name": "vibration_mm_s", "type": "FLOAT"},
+                {"name": "status", "type": "STRING"},
+                {"name": "production_rate", "type": "INTEGER"},
+                {"name": "quality_score", "type": "FLOAT"},
+                {"name": "process_date", "type": "DATE"},
+                {"name": "processed_timestamp", "type": "TIMESTAMP"},
+            ]
+        }
+
+        # For simplicity, treat this as "Silver in BigQuery" rather than Parquet in GCS.
+        # If you want pure file-based Silver, replace this with a Parquet sink.
+        (
+            records
+            | "WriteToSilverBQ" >> beam.io.WriteToBigQuery(
+                table=lambda elem: "your_project.your_dataset.silver_manufacturing_events",
+                schema=table_schema,
+                write_disposition=beam.io.BigQueryDisposition.WRITE_TRUNCATE,
+                create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED,
+            )
+        )
+
+
+if __name__ == "__main__":
+    run()
+'''
+    path = GCP_BASE / "dataflow_pipelines" / "bronze_to_silver.py"
+    path.write_text(content, encoding="utf-8")
+    print(f"✓ Created Dataflow Bronze->Silver pipeline: {path}")
+
+
+def create_bigquery_sql():
+    """
+    Create BigQuery SQL for:
+    - Silver table (if not using Dataflow->BQ directly)
+    - Gold table with user-friendly metrics
+    """
+    content = f"""-- BigQuery SQL for Silver and Gold tables
+
+-- Replace `your_project.your_dataset` with your project and dataset.
+
+-- If you did not load Silver via Dataflow to BigQuery directly, you can define
+-- an external table over GCS Silver here. For this example, we assume Silver
+-- is already in BigQuery as `your_project.your_dataset.silver_manufacturing_events`.
+
+-- Silver schema (example)
+-- CREATE TABLE IF NOT EXISTS `your_project.your_dataset.silver_manufacturing_events` (
+--   timestamp           TIMESTAMP,
+--   device_id           STRING,
+--   facility_id         STRING,
+--   temperature_c       FLOAT64,
+--   pressure_kpa        FLOAT64,
+--   vibration_mm_s      FLOAT64,
+--   status              STRING,
+--   production_rate     INT64,
+--   quality_score       FLOAT64,
+--   process_date        DATE,
+--   processed_timestamp TIMESTAMP
+-- );
+
+
+-- Gold: hourly device metrics with friendly column names and business logic
+CREATE SCHEMA IF NOT EXISTS `your_project.gold_manufacturing`;
+
+CREATE OR REPLACE TABLE `your_project.gold_manufacturing.device_metrics_hourly` AS
+SELECT
+  TIMESTAMP_TRUNC(timestamp, HOUR) AS hour_start,
+  device_id,
+  facility_id,
+  COUNT(*) AS events_count,
+  AVG(temperature_c) AS avg_temperature_c,
+  AVG(pressure_kpa) AS avg_pressure_kpa,
+  AVG(vibration_mm_s) AS avg_vibration_mm_s,
+  AVG(production_rate) AS avg_units_per_hour,
+  AVG(quality_score) AS avg_quality_score,
+  SUM(CASE WHEN status = 'WARNING' THEN 1 ELSE 0 END) AS warning_events,
+  SUM(CASE WHEN status = 'CRITICAL' THEN 1 ELSE 0 END) AS critical_events,
+  CASE WHEN AVG(quality_score) >= 95.0 THEN TRUE ELSE FALSE END AS is_high_quality,
+  CASE
+    WHEN SUM(CASE WHEN status = 'CRITICAL' THEN 1 ELSE 0 END) > 0 THEN TRUE
+    ELSE FALSE
+  END AS is_high_risk
+FROM `your_project.your_dataset.silver_manufacturing_events`
+GROUP BY
+  hour_start,
+  device_id,
+  facility_id;
+"""
+    path = GCP_BASE / "bigquery_sql" / "create_silver_and_gold_tables.sql"
+    path.write_text(content, encoding="utf-8")
+    print(f"✓ Created BigQuery Silver/Gold SQL: {path}")
+
+
+def update_gcp_readme():
+    """Update GCP README with a concrete medallion walkthrough."""
+    now = datetime.utcnow().strftime("%Y-%m-%d")
+
+    content = f"""# GCP Platform Modernization Implementation
+
+## Overview
+
+This folder contains a concrete Medallion-style data platform on **Google Cloud**:
+
+- **Bronze**: Raw JSON in Cloud Storage (from CSV via Dataflow)
+- **Silver**: Cleaned, standardized data in BigQuery (or Parquet in GCS)
+- **Gold**: Hourly device metrics in BigQuery with user-friendly metrics
+
+Core tools:
+
+- Cloud Storage (GCS)
+- Dataflow (Apache Beam)
+- BigQuery
+
+---
+
+## Sample Data
+
+The canonical manufacturing IoT sample data lives at:
+
+- `gcp_implementation/sample_data/manufacturing_events.csv`
+
+Typical columns:
+
+- `timestamp`, `device_id`, `facility_id`, `temperature`, `pressure`,
+  `vibration`, `status`, `production_rate`, `quality_score`
+
+---
+
+## End-to-End Flow
+
+### 1. Dataflow Ingestion: CSV -> Bronze (JSON in GCS)
+
+File: `dataflow_pipelines/ingest_to_bronze.py`
+
+- Reads CSV from a GCS location
+- Normalizes rows into JSON objects
+- Writes line-delimited JSON files into:
+
+```text
+gs://<YOUR_BUCKET>/{BRONZE_PREFIX}
